@@ -1,81 +1,114 @@
 const socket = io();
-
 const fileInput = document.getElementById("fileInput");
 const createBtn = document.getElementById("createBtn");
-const generatedCodeEl = document.getElementById("generatedCode");
-const copyCodeBtn = document.getElementById("copyCodeBtn");
 const senderStatus = document.getElementById("senderStatus");
-const sendProgress = document.getElementById("sendProgress");
+const generatedCode = document.getElementById("generatedCode");
+const copyCodeBtn = document.getElementById("copyCodeBtn");
+const receiversList = document.getElementById("receiversList");
 
-let pc, dataChannel, fileToSend;
-const CHUNK_SIZE = 64 * 1024;
-const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+let fileData = null;
+let fileInfo = null;
+let code = null;
+let pc, dataChannel;
 
-function log(msg) {
-  senderStatus.textContent = "Statut : " + msg;
-}
-
-// Crée un code de partage
+// Créer un code
 createBtn.onclick = () => {
-  if (!fileInput.files.length) return alert("Choisis un fichier !");
-  fileToSend = fileInput.files[0];
-  socket.emit("create-code", { name: fileToSend.name, size: fileToSend.size }, res => {
-    generatedCodeEl.textContent = res.code;
-    log("Code créé. En attente du receveur...");
+  const file = fileInput.files[0];
+  if (!file) return alert("Choisis un fichier !");
+  fileData = file;
+  fileInfo = { name: file.name, size: file.size };
+
+  socket.emit("create-code", fileInfo, res => {
+    code = res.code;
+    generatedCode.textContent = code;
+    senderStatus.textContent = "Statut : En attente de receveur…";
+
+    // Vide la liste des receveurs
+    receiversList.innerHTML = "";
   });
 };
 
 // Copier le code
 copyCodeBtn.onclick = () => {
-  navigator.clipboard.writeText(generatedCodeEl.textContent);
+  if (!code) return;
+  navigator.clipboard.writeText(code);
   alert("Code copié !");
 };
 
 // Quand un receveur rejoint
-socket.on("receiver-joined", async (code) => {
-  log("Receveur connecté !");
-  pc = new RTCPeerConnection(rtcConfig);
-  dataChannel = pc.createDataChannel("file");
-  dataChannel.onopen = () => sendFile(dataChannel);
+socket.on("receiver-joined", rcvCode => {
+  if (rcvCode !== code) return;
+  senderStatus.textContent = "Statut : Receveur connecté !";
 
-  pc.onicecandidate = e => {
-    if (e.candidate)
-      socket.emit("webrtc-ice", { code, candidate: e.candidate });
-  };
+  const li = document.createElement("li");
+  li.textContent = "Receveur connecté, prêt à télécharger…";
+  li.dataset.id = Date.now(); // ID unique pour ce receveur
+  receiversList.appendChild(li);
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  socket.emit("webrtc-offer", { code, desc: pc.localDescription });
+  // Lancer le P2P pour ce receveur
+  startP2P(li);
 });
 
-// Quand on reçoit la réponse du receveur
+// Initialiser le P2P pour un receveur
+function startP2P(li) {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+
+  dataChannel = pc.createDataChannel("file");
+  dataChannel.binaryType = "arraybuffer";
+
+  dataChannel.onopen = () => {
+    li.textContent = `Transfert en cours…`;
+    sendFile(fileData, li);
+  };
+
+  pc.onicecandidate = e => {
+    if (e.candidate) {
+      socket.emit("webrtc-ice", { code, candidate: e.candidate });
+    }
+  };
+
+  // Créer offre et envoyer au receveur
+  pc.createOffer().then(offer => {
+    pc.setLocalDescription(offer);
+    socket.emit("webrtc-offer", { code, desc: offer });
+  });
+}
+
+// Recevoir la réponse du receveur
 socket.on("webrtc-answer", async ({ desc }) => {
   if (pc) await pc.setRemoteDescription(desc);
 });
 
-// Ajout de candidats ICE côté sender
+// Recevoir ICE candidates
 socket.on("webrtc-ice", async ({ candidate }) => {
-  try {
-    await pc.addIceCandidate(candidate);
-  } catch (err) {
-    console.error("Erreur ICE côté sender:", err);
+  if (pc) {
+    try { await pc.addIceCandidate(candidate); } catch (err) { console.error(err); }
   }
 });
 
-// Envoi du fichier
-async function sendFile(dc) {
-  const file = fileToSend;
+// Envoyer le fichier par morceaux (sans barre)
+function sendFile(file, li) {
+  const chunkSize = 16 * 1024; // 16KB
+  const reader = new FileReader();
   let offset = 0;
-  log("Envoi en cours...");
 
-  while (offset < file.size) {
-    const slice = file.slice(offset, offset + CHUNK_SIZE);
-    const buffer = await slice.arrayBuffer();
-    dc.send(buffer);
-    offset += buffer.byteLength;
-    sendProgress.value = Math.round((offset / file.size) * 100);
+  reader.onload = e => {
+    dataChannel.send(e.target.result);
+    offset += e.target.result.byteLength;
+
+    if (offset < file.size) {
+      readSlice(offset);
+    } else {
+      dataChannel.send(JSON.stringify({ done: true, name: file.name }));
+      li.textContent = `✅ Transfert terminé : ${file.name}`;
+      senderStatus.textContent = "Statut : Tous les fichiers envoyés !";
+    }
+  };
+
+  function readSlice(o) {
+    const slice = file.slice(o, o + chunkSize);
+    reader.readAsArrayBuffer(slice);
   }
 
-  dc.send(JSON.stringify({ done: true, name: file.name }));
-  log("Fichier envoyé !");
+  readSlice(0);
 }
