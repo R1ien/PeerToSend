@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3000;
 // Sert les fichiers statiques du dossier public/
 app.use(express.static(path.join(__dirname, "public")));
 
-// Sessions actives : { code: { senderSocket, receiverSocket, fileInfo } }
+// Sessions actives : { code: { senderSocket, receiverSockets: [], fileInfo } }
 const sessions = {};
 
 io.on("connection", socket => {
@@ -24,7 +24,7 @@ io.on("connection", socket => {
   // --- Création d’un code par le sender ---
   socket.on("create-code", (fileInfo, callback) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    sessions[code] = { senderSocket: socket, receiverSocket: null, fileInfo };
+    sessions[code] = { senderSocket: socket, receiverSockets: [], fileInfo };
     console.log("📦 Nouveau code créé :", code, "par", socket.id);
     callback({ code });
   });
@@ -39,12 +39,8 @@ io.on("connection", socket => {
       return callback({ ok: false });
     }
 
-    if (session.receiverSocket) {
-      console.log("❌ Code déjà utilisé par un autre receveur :", code);
-      return callback({ ok: false });
-    }
-
-    session.receiverSocket = socket;
+    // On ajoute ce receveur dans le tableau, pas de blocage
+    session.receiverSockets.push(socket);
     console.log("✅ Receveur connecté pour le code :", code);
     callback({ ok: true, fileInfo: session.fileInfo });
 
@@ -55,9 +51,9 @@ io.on("connection", socket => {
   // --- Transmission des offres WebRTC ---
   socket.on("webrtc-offer", ({ code, desc }) => {
     const s = sessions[code];
-    if (s?.receiverSocket) {
-      s.receiverSocket.emit("webrtc-offer", { desc });
-      console.log("📨 Offre WebRTC envoyée au receveur pour code :", code);
+    if (s?.receiverSockets?.length) {
+      s.receiverSockets.forEach(r => r.emit("webrtc-offer", { desc }));
+      console.log("📨 Offre WebRTC envoyée aux receveurs pour code :", code);
     }
   });
 
@@ -75,9 +71,9 @@ io.on("connection", socket => {
     const s = sessions[code];
     if (!s) return;
 
-    if (socket === s.senderSocket && s.receiverSocket) {
-      s.receiverSocket.emit("webrtc-ice", { candidate });
-    } else if (socket === s.receiverSocket && s.senderSocket) {
+    if (socket === s.senderSocket && s.receiverSockets.length) {
+      s.receiverSockets.forEach(r => r.emit("webrtc-ice", { candidate }));
+    } else if (s.receiverSockets.includes(socket) && s.senderSocket) {
       s.senderSocket.emit("webrtc-ice", { candidate });
     }
   });
@@ -85,10 +81,16 @@ io.on("connection", socket => {
   // --- Déconnexion d’un client ---
   socket.on("disconnect", () => {
     for (const [code, s] of Object.entries(sessions)) {
-      if (s.senderSocket === socket || s.receiverSocket === socket) {
+      if (s.senderSocket === socket) {
+        // Déconnecte tous les receveurs et supprime la session
+        s.receiverSockets.forEach(r => r.disconnect(true));
         delete sessions[code];
-        console.log(`❌ Session ${code} supprimée suite à la déconnexion de ${socket.id}`);
+        console.log(`❌ Session ${code} supprimée suite à la déconnexion de l'expéditeur ${socket.id}`);
         break;
+      } else if (s.receiverSockets.includes(socket)) {
+        // Retire seulement ce receveur
+        s.receiverSockets = s.receiverSockets.filter(r => r !== socket);
+        console.log(`❌ Receveur ${socket.id} retiré du code ${code}`);
       }
     }
   });
