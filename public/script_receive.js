@@ -27,18 +27,21 @@ joinBtn.onclick = () => {
 
   socket.emit("join-code", code, res => {
     if (!res || !res.ok) {
-      log("Code introuvable ou déjà utilisé !");
+      log("Code introuvable !");
+      downloadArea.innerHTML = "";
       return;
     }
     fileInfo = res.fileInfo;
     log(`Connecté ! Fichier : ${fileInfo.name} (${Math.round(fileInfo.size / 1024)} KB)`);
 
-    // Création du bouton Télécharger
-    downloadArea.innerHTML = "";
+    // Affiche "En attente de téléchargement" dans downloadArea
+    downloadArea.innerHTML = "<p>⏳ En attente de téléchargement...</p>";
+
+    // Crée le bouton Télécharger
     const btn = document.createElement("button");
     btn.textContent = "📥 Télécharger";
     btn.className = "btn";
-    btn.onclick = () => startDownload(); // on démarre la P2P au clic
+    btn.onclick = () => startDownload(btn);
     downloadArea.appendChild(btn);
   });
 };
@@ -59,7 +62,7 @@ socket.on("webrtc-offer", ({ desc }) => {
 });
 
 // Initialisation P2P au clic sur Télécharger
-function startDownload() {
+function startDownload(btn) {
   log("Téléchargement en cours...");
   downloadContainer.style.display = "block";
   pc = new RTCPeerConnection(rtcConfig);
@@ -68,6 +71,7 @@ function startDownload() {
     dataChannel = e.channel;
     dataChannel.binaryType = "arraybuffer";
     dataChannel.onmessage = onData;
+    log("Connecté au sender, téléchargement en cours...");
   };
 
   pc.onicecandidate = e => {
@@ -85,13 +89,19 @@ function startDownload() {
       });
     });
   }
+
+  // Supprime le texte "En attente" et le bouton, pour afficher la barre seulement
+  downloadArea.innerHTML = "<p>📥 Téléchargement en cours...</p>";
+  downloadArea.appendChild(downloadContainer);
 }
 
+// Réception ICE candidates
 socket.on("webrtc-ice", async ({ candidate }) => {
   if (!pc) return;
   try { await pc.addIceCandidate(candidate); } catch (err) { console.error(err); }
 });
 
+// Réception des données et mise à jour de la barre
 function onData(e) {
   if (typeof e.data === "string") {
     try {
@@ -104,6 +114,10 @@ function onData(e) {
         a.click();
         log("Téléchargement terminé !");
         downloadBar.style.width = "100%";
+
+        // Affiche que le fichier est téléchargé
+        downloadArea.innerHTML = `<p>✅ Téléchargement terminé : ${msg.name}</p>`;
+
         receiveBuffer = [];
         totalBytes = 0;
         return;
